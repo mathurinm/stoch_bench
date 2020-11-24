@@ -41,6 +41,16 @@ def grad_i_logreg(x, A, b, i):
 
 
 @njit
+def grad_i_logreg_sparse(x, A_data, A_indices, A_indptr, b, i):
+    grad = np.zeros_like(x)
+    Ai_x = 0.
+    startptr, endptr = A_indptr[i], A_indptr[i + 1]
+    for idx in range(startptr, endptr):
+        Ai_x += A_data[idx] * x[A_indices[idx]]
+    scalar = - b[i] / (1. + np.exp(b[i] * Ai_x))
+    grad[A_indices[startptr:endptr]] = A_data[startptr:endptr] * scalar
+    return grad
+
 def grad_logreg(x, A, b):
     return -b * A.T @ (1. / (1. + np.exp(b * (A @ x)))) / len(A)
 
