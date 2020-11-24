@@ -29,11 +29,11 @@ def grad_i_linreg_sparse(x, A_data, A_indices, A_indptr, b, i):
 
 
 def grad_linreg(x, A, b):
-    return A.T @ (A @ x - b) / len(A)
+    return A.T @ (A @ x - b) / A.shape[0]
 
 
 def loss_linreg(x, A, b):
-    return norm(A @ x - b) ** 2 / (2. * len(A))
+    return norm(A @ x - b) ** 2 / (2. * A.shape[0])
 
 
 @njit
@@ -54,57 +54,59 @@ def grad_i_logreg_sparse(x, A_data, A_indices, A_indptr, b, i):
 
 
 def grad_logreg(x, A, b):
-    return -b * A.T @ (1. / (1. + np.exp(b * (A @ x)))) / len(A)
+    return -b * A.T @ (1. / (1. + np.exp(b * (A @ x)))) / A.shape[0]
 
 
 def loss_logreg(x, A, b):
     return np.sum(np.log(1 + np.exp(-b * (A @ x))))
 
 
-def gd(A, b, loss, grad, n_epochs, step):
+def gd(A, b, loss, grad, n_epochs, step, verbose=False):
     x = np.zeros(A.shape[1])
-    losses = []
-    grad_i_calls = []
+    losses = [loss(x, A, b)]
+    grad_i_calls = [0]
 
-    for it in range(n_epochs):
+    for epoch in range(n_epochs):
         x -= step * grad(x, A, b)
         losses.append(loss(x, A, b))
-        grad_i_calls.append(it * len(A))
+        grad_i_calls.append((epoch + 1) * A.shape[0])
+        if verbose:
+            print(f"Epoch {epoch + 1}, loss: {losses[-1]}")
     return x, np.array(losses), np.array(grad_i_calls)
 
 
-def agd(A, b, loss, grad, n_epochs, step):
+def agd(A, b, loss, grad, n_epochs, step, verbose=False):
     x = np.zeros(A.shape[1])
     x_old = x.copy()
     y = x.copy()
-    losses = []
-    grad_i_calls = []
+    losses = [loss(x, A, b)]
+    grad_i_calls = [0]
     t_new = 1
 
-    for it in range(n_epochs):
+    for epoch in range(n_epochs):
         x_old[:] = x
         x = y - step * grad(y, A, b)
         t = t_new
         t_new = (1 + np.sqrt(1 + 4 * t ** 2)) / 2.
         y = x + (t - 1) / t_new * (x - x_old)
         losses.append(loss(x, A, b))
-        grad_i_calls.append(it * len(A))
+        grad_i_calls.append((epoch + 1) * A.shape[0])
+        if verbose:
+            print(f"Epoch {epoch + 1}, loss: {losses[-1]}")
 
     return x, np.array(losses), np.array(grad_i_calls)
 
 
 @njit
 def _sgd_epoch(A, b, x, grad_i, samples, steps):
-    for idx in range(len(A)):
-        i = samples[idx]
+    for i in samples:
         x -= steps[i] * grad_i(x, A, b, i)
 
 
 @njit
 def _sgd_epoch_sparse(A_data, A_indices, A_indptr, b, x, grad_i_sparse,
                       samples, steps):
-    for idx in range(len(b)):
-        i = samples[idx]
+    for i in samples:
         x -= steps[i] * grad_i_sparse(x, A_data, A_indices, A_indptr, b, i)
 
 
@@ -112,8 +114,8 @@ def sgd(A, b, loss, grad_i, grad_i_sparse, n_epochs, step, verbose=False):
     np.random.seed(0)
     n_samples, n_features = A.shape
     x = np.zeros(n_features)
-    losses = []
-    grad_i_calls = []
+    losses = [loss(x, A, b)]
+    grad_i_calls = [0]
 
     for epoch in range(n_epochs):
         samples = np.random.choice(n_samples, n_samples)
@@ -125,56 +127,97 @@ def sgd(A, b, loss, grad_i, grad_i_sparse, n_epochs, step, verbose=False):
             _sgd_epoch(A, b, x, grad_i, samples, steps)
 
         losses.append(loss(x, A, b))
-        grad_i_calls.append(epoch * n_samples)
+        grad_i_calls.append((epoch + 1) * n_samples)
         if verbose:
-            print(f"Epoch {epoch}, loss: {losses[-1]}")
+            print(f"Epoch {epoch + 1}, loss: {losses[-1]}")
     return x, np.array(losses), np.array(grad_i_calls)
 
 
 @njit
-def saga(A, b, loss, grad_i, n_epochs, step):
+def _saga_epoch(A, b, x, grad_i, samples, step, memory_grad, grad_mean):
+    for i in samples:
+        grad = grad_i(x, A, b, i)
+        x -= step * (grad - memory_grad[i] + grad_mean)
+        grad_mean += (grad - memory_grad[i]) / len(b)
+        memory_grad[i] = grad
+
+
+@njit
+def _saga_epoch_sparse(
+        A_data, A_indices, A_indptr, b, x, grad_i_sparse, samples, step,
+        memory_grad, grad_mean):
+    for i in samples:
+        grad = grad_i_sparse(x, A_data, A_indices, A_indptr, b, i)
+        x -= step * (grad - memory_grad[i] + grad_mean)
+        grad_mean += (grad - memory_grad[i]) / len(b)
+        memory_grad[i] = grad
+
+
+def saga(A, b, loss, grad_i, grad_i_sparse, n_epochs, step, verbose=False):
     np.random.seed(0)
     n_samples, n_features = A.shape
     memory_grad = np.zeros((n_samples, n_features))
     x = np.zeros(n_features)
-    losses = []
-    grad_i_calls = []
+    losses = [loss(x, A, b)]
+    grad_i_calls = [0]
     grad_mean = np.zeros(n_features)
-    for it in range(n_epochs * n_samples):
-        i = np.random.choice(n_samples)
-        grad = grad_i(x, A, b, i)
-        x -= step * (grad - memory_grad[i] + grad_mean)
-        # udpdate table of gradient and its mean:
-        grad_mean += (grad - memory_grad[i]) / n_samples
-        memory_grad[i] = grad
-        if it % n_samples == 0:
-            losses.append(loss(x, A, b))
-            grad_i_calls.append(it)
+    for epoch in range(n_epochs):
+        samples = np.random.choice(n_samples, n_samples)
+        if sparse.issparse(A):
+            _saga_epoch_sparse(A.data, A.indices, A.indptr, b, x,
+                               grad_i_sparse, samples, step,
+                               memory_grad, grad_mean)
+        else:
+            _saga_epoch(A, b, x, grad_i, samples, step, memory_grad, grad_mean)
+
+        losses.append(loss(x, A, b))
+        grad_i_calls.append((epoch + 1) * n_samples)
+        if verbose:
+            print(f"Epoch {epoch + 1}, loss: {losses[-1]}")
     return x, np.array(losses), np.array(grad_i_calls)
 
 
 @njit
-def svrg(A, b, loss, grad_i, grad, n_epochs, step, m):
+def _svrg_epoch(A, b, x, grad_i, samples, step, x_ref, grad_full):
+    for i in samples:
+        x -= step * (grad_i(x, A, b, i) - grad_i(x_ref, A, b, i)
+                     + grad_full)  # 2 grad_i calls
+
+
+@njit
+def _svrg_epoch_sparse(A_data, A_indices, A_indptr, b, x, grad_i_sparse,
+                       samples, step, x_ref, grad_full):
+    for i in samples:
+        x -= step * (grad_i_sparse(x, A_data, A_indices, A_indptr, b, i)
+                     - grad_i_sparse(x_ref, A_data, A_indices, A_indptr, b, i)
+                     + grad_full)  # 2 grad_i calls
+
+
+def svrg(A, b, loss, grad_i, grad_i_sparse, grad, n_epochs, step, m,
+         verbose=False):
     """1 full gradient, m * n_samples stochastic gradients:
-    1 iteration costs  (2m + 1 * n_samples)"""
+    1 iteration costs  (2m + 1) * n_samples)"""
     np.random.seed(0)
     n_samples, n_features = A.shape
 
     x = np.zeros(n_features)
     x_ref = np.zeros(n_features)
-    losses = []
-    grad_i_calls = []
-    for it in range(n_epochs):
+    losses = [loss(x, A, b)]
+    grad_i_calls = [0]
+    for epoch in range(n_epochs):
         x_ref[:] = x
         grad_full = grad(x_ref, A, b)  # n_samples grad_i calls
-        for t in range(m * n_samples):
-            i = np.random.choice(n_samples)
-            x -= step * (grad_i(x, A, b, i) - grad_i(x_ref, A, b, i)
-                         + grad_full)  # 2 grad_i calls
-            if t % n_samples == 0:
-                losses.append(loss(x, A, b))
-                grad_i_calls.append(
-                    it * n_samples * (1 + 2 * m) + 2 * t)
+        samples = np.random.choice(n_samples, m * n_samples)
+        if sparse.issparse(A):
+            _svrg_epoch_sparse(A.data, A.indices, A.indptr, b, x,
+                               grad_i_sparse, samples, step, x_ref, grad_full)
+        else:
+            _svrg_epoch(A, b, x, grad_i, samples, step, x_ref, grad_full)
+
+        losses.append(loss(x, A, b))
+        grad_i_calls.append(n_samples * (epoch + 1) * (1 + 2 * m))
+        if verbose:
+            print(f"Epoch {epoch + 1}, loss: {losses[-1]}")
     return x, np.array(losses), np.array(grad_i_calls)
 
 
@@ -187,6 +230,7 @@ def solver(A, b, pb, algo, algo_params):
         grad_i, grad_i_sparse = grad_i_logreg, grad_i_logreg_sparse
     else:
         raise ValueError(f"Unsupported problem {pb}")
+
     if algo == "gd":
         return gd(A, b, loss, grad, **algo_params)
     elif algo == "agd":
@@ -194,8 +238,8 @@ def solver(A, b, pb, algo, algo_params):
     elif algo == "sgd":
         return sgd(A, b, loss, grad_i, grad_i_sparse, **algo_params)
     elif algo == "svrg":
-        return svrg(A, b, loss, grad_i, grad, **algo_params)
+        return svrg(A, b, loss, grad_i, grad_i_sparse, grad, **algo_params)
     elif algo == "saga":
-        return saga(A, b, loss, grad_i, **algo_params)
+        return saga(A, b, loss, grad_i, grad_i_sparse, **algo_params)
     else:
         raise ValueError(f"Unsupported algo {algo}")
