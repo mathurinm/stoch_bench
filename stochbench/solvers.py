@@ -1,4 +1,5 @@
 import numpy as np
+from scipy import sparse
 from numba import njit
 from numpy.linalg import norm
 import matplotlib
@@ -51,11 +52,11 @@ def grad_i_logreg_sparse(x, A_data, A_indices, A_indptr, b, i):
     grad[A_indices[startptr:endptr]] = A_data[startptr:endptr] * scalar
     return grad
 
+
 def grad_logreg(x, A, b):
     return -b * A.T @ (1. / (1. + np.exp(b * (A @ x)))) / len(A)
 
 
-@njit
 def loss_logreg(x, A, b):
     return np.sum(np.log(1 + np.exp(-b * (A @ x))))
 
@@ -93,20 +94,40 @@ def agd(A, b, loss, grad, n_epochs, step):
 
 
 @njit
-def sgd(A, b, loss, grad_i, n_epochs, step):
+def _sgd_epoch(A, b, x, grad_i, samples, steps):
+    for idx in range(len(A)):
+        i = samples[idx]
+        x -= steps[i] * grad_i(x, A, b, i)
+
+
+@njit
+def _sgd_epoch_sparse(A_data, A_indices, A_indptr, b, x, grad_i_sparse,
+                      samples, steps):
+    for idx in range(len(b)):
+        i = samples[idx]
+        x -= steps[i] * grad_i_sparse(x, A_data, A_indices, A_indptr, b, i)
+
+
+def sgd(A, b, loss, grad_i, grad_i_sparse, n_epochs, step, verbose=False):
     np.random.seed(0)
     n_samples, n_features = A.shape
     x = np.zeros(n_features)
     losses = []
     grad_i_calls = []
 
-    for it in range(n_epochs * n_samples):
-        i = np.random.choice(n_samples)
-        x -= step / np.sqrt(it + 1) * grad_i(x,  A, b, i)
+    for epoch in range(n_epochs):
+        samples = np.random.choice(n_samples, n_samples)
+        steps = step / np.sqrt(epoch * n_samples + np.arange(1, n_samples + 1))
+        if sparse.issparse(A):
+            _sgd_epoch_sparse(A.data, A.indices, A.indptr, b, x, grad_i_sparse,
+                              samples, steps)
+        else:
+            _sgd_epoch(A, b, x, grad_i, samples, steps)
 
-        if it % n_samples == 0:
-            losses.append(loss(x, A, b))
-            grad_i_calls.append(it)
+        losses.append(loss(x, A, b))
+        grad_i_calls.append(epoch * n_samples)
+        if verbose:
+            print(f"Epoch {epoch}, loss: {losses[-1]}")
     return x, np.array(losses), np.array(grad_i_calls)
 
 
@@ -159,9 +180,11 @@ def svrg(A, b, loss, grad_i, grad, n_epochs, step, m):
 
 def solver(A, b, pb, algo, algo_params):
     if pb == "linreg":
-        loss, grad, grad_i = loss_linreg, grad_linreg, grad_i_linreg
+        loss, grad = loss_linreg, grad_linreg,
+        grad_i, grad_i_sparse = grad_i_linreg, grad_i_linreg_sparse
     elif pb == "logreg":
-        loss, grad, grad_i = loss_logreg, grad_logreg, grad_i_logreg
+        loss, grad = loss_logreg, grad_logreg
+        grad_i, grad_i_sparse = grad_i_logreg, grad_i_logreg_sparse
     else:
         raise ValueError(f"Unsupported problem {pb}")
     if algo == "gd":
@@ -169,7 +192,7 @@ def solver(A, b, pb, algo, algo_params):
     elif algo == "agd":
         return agd(A, b, loss, grad, **algo_params)
     elif algo == "sgd":
-        return sgd(A, b, loss, grad_i, **algo_params)
+        return sgd(A, b, loss, grad_i, grad_i_sparse, **algo_params)
     elif algo == "svrg":
         return svrg(A, b, loss, grad_i, grad, **algo_params)
     elif algo == "saga":

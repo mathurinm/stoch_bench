@@ -1,12 +1,15 @@
 import numpy as np
 import matplotlib
-import matplotlib.pyplot as pyplot
+from scipy import sparse
+from numpy.linalg import norm
+import matplotlib.pyplot as plt
 from libsvmdata import fetch_libsvm
 
 from stochbench import solver
 
 np.random.seed(0)
-data = "simu"
+# data = "simu"
+data = "news20"
 pb = "logreg"
 
 if data == "simu":
@@ -14,8 +17,9 @@ if data == "simu":
     A = np.random.randn(n_samples, n_features)
     b = A @ np.random.randn(n_features) + 0.5 * np.random.randn(n_samples)
 else:
-    A, b = fetch_libsvm("news20")
+    A, b = fetch_libsvm(data)
     A = A.tocsr()
+    A = A[:1000]
 
 
 if pb == "linreg":
@@ -31,19 +35,25 @@ n_epochs = 100
 
 
 step_sgd = 0.01
-step_saga = gamma / np.max(norm(A, axis=1) ** 2) / 3.
-step_gd = step = gamma / (norm(A, ord=2) ** 2 / n_samples)
+if sparse.issparse(A):
+    step_saga = gamma / np.max(sparse.linalg.norm(A, axis=1) ** 2) / 3.
+    step_gd = gamma / (sparse.linalg.svds(A, k=1)[1][0] ** 2 / len(b))
+
+else:
+    step_saga = gamma / np.max(norm(A, axis=1) ** 2) / 3.
+    step_gd = gamma / (norm(A, ord=2) ** 2 / len(b))
 
 m_svrg = 3
 
-algos = ["sgd", "saga", "svrg", "gd", "agd"]
+# algos = ["sgd", "saga", "svrg", "gd", "agd"]
+algos = ["sgd"]
 labels = [r"SGD, step=$%.2f / \sqrt{t}$" % step_sgd,
           "SAGA",
           "SVRG, $m=%d$" % m_svrg,
           "GD",
           "AGD"]
 params = dict()
-params["sgd"] = {'n_epochs': n_epochs, 'step': step_sgd}
+params["sgd"] = {'n_epochs': n_epochs, 'step': step_sgd, 'verbose': True}
 params["saga"] = {'n_epochs': n_epochs, 'step': step_saga}
 params["gd"] = {'n_epochs': n_epochs, 'step': step_gd}
 params["agd"] = {'n_epochs': n_epochs, 'step': step_gd}
