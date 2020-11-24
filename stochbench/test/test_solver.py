@@ -12,7 +12,7 @@ def test_grad_linreg_sparse():
     x = np.random.randn(n_features)
 
     A[A < 0.1] = 0
-    A_sparse = sparse.csc_matrix(A)
+    A_sparse = sparse.csr_matrix(A)
     grad1 = grad_i_linreg(x, A, b, 12)
     grad2 = grad_i_linreg_sparse(x, A_sparse.data, A_sparse.indices,
                                  A_sparse.indptr, b, 12)
