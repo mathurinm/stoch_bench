@@ -157,7 +157,7 @@ if data == "simu":
     n_samples, n_features = 1000, 500
     A = np.random.randn(n_samples, n_features)
     b = A @ np.random.randn(n_features) + 0.5 * np.random.randn(n_samples)
-    b -= b.men()
+    b -= b.mean()
     b /= np.std(b)
 else:
     A, b = fetch_libsvm("news20")
