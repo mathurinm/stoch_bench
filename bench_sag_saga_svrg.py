@@ -39,7 +39,7 @@ def loss_logreg(x, A, b):
 
 
 def gd(A, b, loss, grad, n_epochs, step):
-    x = np.zeros(n_features)
+    x = np.zeros(A.shape[1])
     losses = [norm(b) ** 2 / (2 * len(b))]
     grad_i_calls = [0]
 
@@ -50,7 +50,27 @@ def gd(A, b, loss, grad, n_epochs, step):
     return x, np.array(losses), np.array(grad_i_calls)
 
 
-@ njit
+def agd(A, b, loss, grad, n_epochs, step):
+    x = np.zeros(A.shape[1])
+    x_old = x.copy()
+    y = x.copy()
+    losses = [norm(b) ** 2 / (2 * len(b))]
+    grad_i_calls = [0]
+    t_new = 1
+
+    for it in range(n_epochs):
+        x_old[:] = x
+        x = y - step * grad(y, A, b)
+        t = t_new
+        t_new = (1 + np.sqrt(1 + 4 * t ** 2)) / 2.
+        y = x + (t - 1) / t_new * (x - x_old)
+        losses.append(loss(x, A, b))
+        grad_i_calls.append(it * len(A))
+
+    return x, np.array(losses), np.array(grad_i_calls)
+
+
+@njit
 def sgd(A, b, loss, grad_i, n_epochs, step):
     np.random.seed(0)
     n_samples, n_features = A.shape
@@ -68,7 +88,7 @@ def sgd(A, b, loss, grad_i, n_epochs, step):
     return x, np.array(losses), np.array(grad_i_calls)
 
 
-@ njit
+@njit
 def saga(A, b, loss, grad_i, n_epochs, step):
     np.random.seed(0)
     n_samples, n_features = A.shape
@@ -90,8 +110,8 @@ def saga(A, b, loss, grad_i, n_epochs, step):
     return x, np.array(losses), np.array(grad_i_calls)
 
 
-@ njit
-def svrg(A, b, loss, grad_i, grad, m, n_epochs, step):
+@njit
+def svrg(A, b, loss, grad_i, grad, n_epochs, step, m):
     """1 full gradient, m * n_samples stochastic gradients:
     1 iteration costs  (2m + 1 * n_samples)"""
     np.random.seed(0)
@@ -115,55 +135,71 @@ def svrg(A, b, loss, grad_i, grad, m, n_epochs, step):
     return x, np.array(losses), np.array(grad_i_calls)
 
 
+def solver(A, b, loss, grad, grad_i, algo, n_epochs, step, algo_params):
+    if algo == "gd":
+        return gd(A, b, loss, grad, n_epochs, step, **algo_params)
+    elif algo == "agd":
+        return agd(A, b, loss, grad, n_epochs, step, **algo_params)
+    elif algo == "sgd":
+        return sgd(A, b, loss, grad_i, n_epochs, step, **algo_params)
+    elif algo == "svrg":
+        return svrg(A, b, loss, grad_i, grad, n_epochs, step, **algo_params)
+    elif algo == "saga":
+        return saga(A, b, loss, grad_i, n_epochs, step, **algo_params)
+    else:
+        raise ValueError(f"Unsupported algo {algo}")
+
+
 np.random.seed(0)
-n_samples, n_features = 1000, 500
-A = np.random.randn(n_samples, n_features)
-b = A @ np.random.randn(n_features) + 0.5 * np.random.randn(n_samples)
+data = "simu"
+
+if data == "simu":
+    n_samples, n_features = 1000, 500
+    A = np.random.randn(n_samples, n_features)
+    b = A @ np.random.randn(n_features) + 0.5 * np.random.randn(n_samples)
+    b -= b.men()
+    b /= np.std(b)
+else:
+    A, b = fetch_libsvm("news20")
 
 
 n_epochs = 100
 
 
 step_sgd = 0.01
-
-store_every = n_samples
-print('sgd')
-x_sgd, loss_sgd, calls_sgd = sgd(
-    A, b, loss_linreg, grad_i_linreg,
-    n_epochs, step=step_sgd)
-
-print('saga')
 step_saga = 1 / np.max(norm(A, axis=1) ** 2) / 3.
-x_saga, loss_saga, calls_saga = saga(
-    A, b, loss_linreg, grad_i_linreg, n_epochs,
-    step=step_saga)
-
-
-m_svrg = 1
-print('svrg')
-x_svrg, loss_svrg, calls_svrg = svrg(
-    A, b, loss_linreg, grad_i_linreg, grad_linreg, m=m_svrg,
-    n_epochs=n_epochs // (2 * m_svrg + 1), step=step_saga)
-
-
-print('gd')
 step_gd = step = 1. / (norm(A, ord=2) ** 2 / n_samples)
-x_gd, loss_gd, calls_gd = gd(A, b, loss_linreg, grad_linreg,
-                             n_epochs, step=step_gd)
+
+algos = ["sgd", "saga", "svrg", "gd", "agd"]
+labels = ["SGD", "SAGA", "SVRG", "GD", "AGD"]
+params = [{}, {}, {'m': 1}, {}, {}]
+steps = [step_sgd, step_saga, step_saga, step_gd, step_gd]
+m_svrg = 1
+
+
+all_x = dict()
+all_loss = dict()
+all_calls = dict()
+
+
+for algo, step, algo_params in zip(algos, steps, params):
+    print(algo)
+    all_x[algo], all_loss[algo], all_calls[algo] = solver(
+        A, b, loss_linreg, grad_linreg, grad_i_linreg,
+        algo=algo, n_epochs=n_epochs, step=step, algo_params=algo_params)
 
 
 clf = LinearRegression(fit_intercept=False, normalize=False).fit(A, b)
 best_obj = norm(b - clf.predict(A)) ** 2 / (2 * len(A))
 
+
 plt.close('all')
 plt.figure()
-plt.ylabel(r"$P(x_k) - P(x^*)$")
-plt.semilogy(calls_saga, loss_saga - best_obj, label="SAGA")
-plt.semilogy(calls_sgd, loss_sgd - best_obj, label=f"SGD, step={step_sgd:.3f}")
-plt.semilogy(calls_svrg, loss_svrg - best_obj, label=f"SVRG, m={m_svrg}")
-plt.semilogy(calls_gd, loss_gd - best_obj, label="GD")
-plt.title(f"Linreg problem, n={n_samples}, d={n_features}")
+for algo, label in zip(algos, labels):
+    plt.semilogy(all_calls[algo], all_loss[algo] - best_obj, label=label)
 
+plt.title(f"Linreg problem, n={n_samples}, d={n_features}")
+plt.ylabel(r"$P(x_k) - P(x^*)$")
 plt.xlabel(r'# calls to $\nabla \psi_i$')
 plt.legend()
 plt.show(block=False)
